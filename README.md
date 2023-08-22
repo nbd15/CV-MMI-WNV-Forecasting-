@@ -16,3 +16,5 @@ The primary post-processing scripts are ```coachella_valley_forecasts_plots.R```
 Helper functions for the above scripts can be found in ```glmm_functions.R```.
 
 Please email aman.patel1@mssm.edu for any questions about the repository.
+
+[![DOI](https://zenodo.org/badge/617636986.svg)](https://zenodo.org/badge/latestdoi/617636986)

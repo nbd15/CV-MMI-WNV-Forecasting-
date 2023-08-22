@@ -44,7 +44,9 @@ suppressPackageStartupMessages({
   library(tidyverse)
   library(grid)
   library(ggpubr)
+  library(gghighlight)
   library(data.table)
+  library(ggpattern)
 })
 
 # change global options
@@ -73,26 +75,26 @@ figure_folder <- "figures/"
 MLE_def_str <- "MLE: 500+ mosquitoes tested in at least 12 years"
 
 # import model output parameters
-model_ests <- setDT(read_excel("model_outputs/2006-2021/cv_2006_2021_all_years_over_11_obs.xlsx", sheet = "Model Parameters"))
-head(model_ests)
+
+model_ests_2018 <- setDT(read_excel("model_outputs/2006-2018/cv_2006_2018_all_years_over_11_obs.xlsx", sheet = "Model Parameters"))
+model_ests_2021 <- setDT(read_excel("model_outputs/2006-2021/cv_2006_2021_all_years_over_11_obs.xlsx", sheet = "Model Parameters"))
+head(model_ests_2021)
 
 # import shapefiles -- all of Coachella Valley and intersecting NLDAS grid cells
 region_shp <- st_read("shapefiles/coachella_valley_latlon.shp", quiet = TRUE)
 nldas_polygons <- st_read("shapefiles/cv_nldas.shp", quiet = TRUE) %>% rename("nldasID" = NLDAS_ID)
 
 # load NLDAS and MLE data
-nldas_dt <- fread("data/cv_monthly_nldas_2005_2022.csv")
+
 nldas_mle_annual <- fread("data/cv_n500_mle_2006_2022_over_11_obs.csv")
+nldas_dt <- fread("data/cv_monthly_nldas_2005_2022.csv") %>%
+  filter(nldasID %in% nldas_mle_annual$nldasID)
 
 # Extract components of shapefile, set terrain
 nldas_ids <- nldas_polygons %>% st_drop_geometry() %>% setDT()
 terrain <- get_map(location = c(-116.625, 33.375, -115.875, 34.000), zoom = 10, maptype = "terrain")
 
 #######################         Preprocessing        ##########################
-
-# sort by month within each NLDAS cell
-nldas_dt <- nldas_dt[order(year,nldasID,month)]
-nldas_dt[,nldasID := factor(nldasID)]
 
 # create binned MLE variable
 threshold <- round(quantile(nldas_mle_annual$MLE, 0.75)[[1]], 1)
@@ -123,40 +125,48 @@ st_bbox(nldas_polygons)
 # Get training data
 
 # set time bounds for training data
-start_year <- 2006
-end_year <- 2021
 
-# sort NLDAS cells by month
-nldas_ids <- unique(nldas_dt$nldasID)
-nldas_dt <- nldas_dt[order(nldasID, year, month)]
-
-# original and new column names for lag
-og_cols <- c("temp", "evpsfc")
-new_cols <- c("tmp_lag", "evp_lag")
-
-# lag environmental variables by 4 months
-# each year will now have data from September to August instead of January to December
-env_dt <- nldas_dt[, (new_cols) := shift(.SD, 4), by = nldasID, .SDcols = og_cols]
-
-# calculate standardized environmental values
-env_dt_sub <- env_dt[year %in% start_year:end_year]
-env_std <- env_dt_sub[,.(year,tmp_std = scale(tmp_lag, scale = T, center = T)[,1],
-                         evp_std = scale(evp_lag, scale = T, center = T)[,1]),.(nldasID,month)]
-
-# calculate mean and sd for environmental variables
-# used in scaling test data
-env_means <- env_dt[year %in% start_year:end_year,.(mean_tmp = mean(tmp_lag,na.rm = T), sd_tmp = sd(tmp_lag,na.rm = T), 
-                                                    mean_evp = mean(evp_lag,na.rm = T), sd_evp = sd(evp_lag,na.rm = T)),.(nldasID, month)]
-
-# pivot standardized environmental vars from long to wide
-env_wide <- dcast(env_std, nldasID + year ~ month, value.var = c("tmp_std","evp_std"))
-setnames(env_wide, c("nldasID","year", paste0("tmp_",c(9:12,1:8)), paste0("evp_",c(9:12,1:8))))
-
-# join wide standardized environmental data to MLE
-train_dt <- env_wide[nldas_mle_annual, on = c("nldasID","year"),nomatch = 0]
-
-# generate all combos of env variables for modeling
-var.dt <- as.data.table(t(combn(names(train_dt)[3:26], n_preds)))
+get_training_data <- function(start_year, end_year) {
+  
+  # sort NLDAS cells by month
+  nldas_dt[,nldasID := factor(nldasID)]
+  nldas_ids <- unique(nldas_dt$nldasID)
+  nldas_dt <- nldas_dt[order(nldasID, year, month)]
+  
+  # original and new column names for lag
+  og_cols <- c("temp", "evpsfc")
+  new_cols <- c("tmp_lag", "evp_lag")
+  
+  # lag environmental variables by 4 months
+  # each year will now have data from September to August instead of January to December
+  env_dt <- nldas_dt[, (new_cols) := data.table::shift(.SD, 4), by = nldasID, .SDcols = og_cols]
+  
+  # calculate standardized environmental values
+  env_dt_sub <- env_dt[year %in% start_year:end_year]
+  env_std <- env_dt_sub[,.(year,tmp_std = scale(tmp_lag, scale = T, center = T)[,1],
+                           evp_std = scale(evp_lag, scale = T, center = T)[,1]),.(nldasID,month)]
+  
+  # calculate mean and sd for environmental variables
+  # used in scaling test data
+  env_means <- env_dt[year %in% start_year:end_year,.(mean_tmp = mean(tmp_lag,na.rm = T), sd_tmp = sd(tmp_lag,na.rm = T), 
+                                                      mean_evp = mean(evp_lag,na.rm = T), sd_evp = sd(evp_lag,na.rm = T)),.(nldasID, month)]
+  
+  # pivot standardized environmental vars from long to wide
+  env_wide <- dcast(env_std, nldasID + year ~ month, value.var = c("tmp_std","evp_std"))
+  setnames(env_wide, c("nldasID","year", paste0("tmp_",c(9:12,1:8)), paste0("evp_",c(9:12,1:8))))
+  
+  # join wide standardized environmental data to MLE
+  train_dt <- env_wide[nldas_mle_annual, on = c("nldasID","year"),nomatch = 0]
+  
+  # generate all combos of env variables for modeling
+  var.dt <- as.data.table(t(combn(names(train_dt)[3:26], n_preds)))
+  
+  return(list("env_dt" = env_dt,
+              "env_means" = env_means,
+              "train_dt" = train_dt,
+              "var.dt" = var.dt))
+  
+}
 
 #######################       Yearly Predictions     ###########################
 
@@ -181,6 +191,7 @@ get_forecast_for_year <- function(year_i, m.wts) {
   # create test dataset standardized by the training means and standard deviations
   test_dt <- env_means[env_dt[year == year_i], on = c("nldasID","month"), nomatch = 0]
   test.std <- test_dt[,.(tmp_std = (tmp_lag - mean_tmp)/sd_tmp, evp_std = (evp_lag - mean_evp)/sd_evp),.(nldasID,month,year)]
+  test.std[is.na(test.std)] <- 0
   test_dt <- dcast(test.std, nldasID + year ~ month, value.var = c("tmp_std","evp_std"))
   setnames(test_dt, c("nldasID","year", paste0("tmp_",c(9:12,1:8)), paste0("evp_",c(9:12,1:8))))
   
@@ -214,13 +225,20 @@ get_forecast_for_year <- function(year_i, m.wts) {
 }
 
 # get Jan-Aug models and weights
-model_wts <- get_model_weights(model_ests, month_range = c(11, 7))
+model_wts <- get_model_weights(model_ests_2018, month_range = c(10, 7), vars = c("tmp", "evp"))
 
-# get forecasts for 2022 based on 2006-2021 training data
+training_data <- get_training_data(2006, 2018)
+
+env_dt <- training_data$env_dt
+env_means <- training_data$env_means
+train_dt <- training_data$train_dt
+var.dt <- training_data$var.dt
+
+# get forecasts for 2019-2021 based on 2006-2018 training data
 if (is.character(model_wts)) {
-  fcst_2022 <- "No forecast."
+  fcst_2019_2021 <- "No forecast."
 } else {
-  fcst_2022 <- get_forecast_for_year(year = 2022, m.wts = model_wts)
+  fcst_2019_2021 <- lapply(2019:2021, get_forecast_for_year, m.wts = model_wts) %>% bind_rows()
 }
 
 #######################    Yearly Prediction Plots   ##########################
@@ -229,26 +247,32 @@ if (is.character(model_wts)) {
 
 plot_observed_predicted_agreement <- function() {
   
-  # get observed MLE for 2022
-  obs_mle_2022 <- nldas_mle_annual[year == 2022]
-  obs_mle_2022[,model_num := "Observed"]
+  # get observed MLE for 2019-2021
+  obs_mle_2019_2021 <- nldas_mle_annual[year %in% 2019:2021]
+  obs_mle_2019_2021[,model_num := "Observed"]
   
   
   # compare forecasts to observed to determine agreement
-  agreement_2022 <- fcst_2022[obs_mle_2022, on = c("nldasID","year")]
-  agreement_2022[MLE >= threshold, Agreement := ensemble_est >= threshold]
-  agreement_2022[MLE < threshold, Agreement := ensemble_est < threshold]
+  agreement_2019_2021 <- fcst_2019_2021[obs_mle_2019_2021, on = c("nldasID","year")]
+  
+  agreement_2019_2021 %>%
+    mutate(err_sq = (MLE - ensemble_est)^2) %>%
+    group_by(year) %>%
+    summarize(rmse = sqrt(mean(err_sq)))
+  
+  agreement_2019_2021[MLE >= threshold, Agreement := ensemble_est >= threshold]
+  agreement_2019_2021[MLE < threshold, Agreement := ensemble_est < threshold]
   
   # prepare agreement values for plotting with observed and predicted
-  agreement_2022 <- setDT(melt(agreement_2022, id.vars = c("nldasID"),
+  agreement_2019_2021 <- setDT(melt(agreement_2019_2021, id.vars = c("nldasID", "year"),
                                measure.vars = "Agreement",
                                variable.name = "Prediction", value.name = "MLE", variable.factor = F))
-  agreement_2022[,Est.Type := "Agreement"]
-
+  agreement_2019_2021[,Est.Type := "Agreement"]
+  
   # combine observed and forecast
-  obs_fcst <- rbindlist(list(observed = obs_mle_2022[,.(nldasID,MLE,MLE_L95,MLE_U95)] %>% 
+  obs_fcst <- rbindlist(list(observed = obs_mle_2019_2021[,.(nldasID,year,MLE,MLE_L95,MLE_U95)] %>% 
                                setnames(c("MLE","MLE_L95","MLE_U95"),c("Est","L.95","U.95")),
-                             forecast = fcst_2022[,.(nldasID,ensemble_est,L.95,U.95)] %>% 
+                             forecast = fcst_2019_2021[,.(nldasID,year,ensemble_est,L.95,U.95)] %>% 
                                setnames("ensemble_est","Est")),idcol = "Est.Type")
   
   # create binned MLE variable
@@ -262,7 +286,7 @@ plot_observed_predicted_agreement <- function() {
   obs_fcst[,MLE := relevel(MLE,ref = "0")]
   
   # combine observed, predicted, and agreement values
-  obs_pred_agreement <- rbindlist(list(obs_fcst, agreement_2022), fill = TRUE)
+  obs_pred_agreement <- rbindlist(list(obs_fcst, agreement_2019_2021), fill = TRUE)
   
   # change variable types for plotting
   obs_pred_agreement[, MLE := as.character(MLE)]
@@ -281,25 +305,28 @@ plot_observed_predicted_agreement <- function() {
   names(pred_cols) <- levels(obs_pred_agreement$MLE)
   
   # plot observed, predicted, and agreement values together
-  pred_map_2022 <- ggmap(terrain) + 
+  pred_map_2019_2021 <- ggmap(terrain) + 
     geom_sf(data = nldas_polygons, fill = NA, inherit.aes = F) + 
     geom_sf(data = obs_pred_agreement_sf %>% filter(!is.na(MLE)), aes(fill = MLE), inherit.aes = F) + 
     scale_fill_manual(values = pred_cols) + 
     geom_sf_text(data = obs_pred_agreement_sf %>% filter(!is.na(MLE) & Est.Type != "Agreement"), 
                  aes(label = round(Est,1)), size = 6, inherit.aes = F) + 
-    facet_grid(~ Est.Type, switch = "y") + 
+    facet_grid(Est.Type ~ year, switch = "y") + 
     labs(y = "Latitude",
          x = "Longitude",
          fill = expression(I[M]), 
-         title = "2022 Observed and Ensemble-Predicted Infection Rates with Agreement") + 
+         title = "2019-2021 Observed and Ensemble-Predicted Infection Rates with Agreement") + 
     theme(axis.text.x = element_text(angle = 45, hjust = 1),
           plot.subtitle = element_blank(),
           strip.text = element_text(size = 14),
           axis.title = element_text(size = 14),
           legend.text = element_text(size = 14),
-          legend.title = element_text(size = 14))
+          legend.title = element_text(size = 14),
+          plot.title = element_blank())
   
-  ggsave(paste0(figure_folder, "obs_pred_agreement.png"), pred_map_2022, width = 12, height = 5)
+  pred_map_2019_2021
+  
+  ggsave(paste0(figure_folder, "obs_pred_agreement_2019_2021.jpg"), pred_map_2019_2021, width = 12, height = 12)
   
 }
 
@@ -309,7 +336,7 @@ plot_observed_predicted_agreement()
 
 # 2022 Monthly Predictions
 
-get_monthly_predictions <- function(pred_month, m.wts) {
+get_monthly_predictions <- function(pred_month, m.wts, pred_year) {
   
   # find models in ensemble
   ens_models_list <- unique(m.wts$model_num)
@@ -317,10 +344,13 @@ get_monthly_predictions <- function(pred_month, m.wts) {
   # prior_dt is environmental data for months prior to forecast date
   # environmental data after the forecast date is set as the mean from previous years
   # this standardizes to 0 in the next step
-  prior_dt <- env_dt[year == 2022 & month %in% 1:(pred_month + 4), .(nldasID, month, tmp_lag, evp_lag)]
-  future_dt <- env_means[month %in% (pred_month + 5):12, .(nldasID, month, tmp_lag = mean_tmp, evp_lag = mean_evp)]
-  raw_test_dt <- setDT(rbind(prior_dt, future_dt))
-  
+  if (pred_month == -4) {
+    raw_test_dt <- env_means[,.(nldasID, month, tmp_lag = mean_tmp, evp_lag = mean_evp)]
+  } else {
+    prior_dt <- env_dt[year == pred_year & month %in% 1:(pred_month + 4), .(nldasID, month, tmp_lag, evp_lag)]
+    future_dt <- env_means[month %in% (pred_month + 5):12, .(nldasID, month, tmp_lag = mean_tmp, evp_lag = mean_evp)]
+    raw_test_dt <- setDT(rbind(prior_dt, future_dt))
+  }
   # create test data
   test_dt <- env_means[raw_test_dt, on = c("nldasID", "month")]
   
@@ -351,19 +381,27 @@ get_monthly_predictions <- function(pred_month, m.wts) {
                                 U.95 = exp(mu + (sigma*1.96)))]
   
   nldas_4p_ens_model_fcst[,`:=`(model_num = "Ensemble",
-                                month = pred_month)]
+                                month = ifelse(pred_month < 1, pred_month + 12, pred_month),
+                                year = pred_year)]
   
   return(nldas_4p_ens_model_fcst)
   
 }
 
 # get Nov-Aug models and weights
-model_wts <- get_model_weights(model_ests, month_range = c(11, 7))
+model_wts <- get_model_weights(model_ests_2021, month_range = c(10, 7))
+
+training_data <- get_training_data(2006, 2021)
+
+env_dt <- training_data$env_dt
+env_means <- training_data$env_means
+train_dt <- training_data$train_dt
+var.dt <- training_data$var.dt
 
 if (is.character(model_wts)) {
   forecasts_mar_jul_2022 <- "No forecast."
 } else {
-  forecasts_mar_jul_2022 <- lapply(3:7, get_monthly_predictions, m.wts = model_wts) %>% bind_rows()
+  forecasts_mar_jul_2022 <- lapply(3:7, get_monthly_predictions, m.wts = model_wts, pred_year = 2022) %>% bind_rows()
 }
 
 #######################    Monthly Prediction Plots  #########################
@@ -381,7 +419,7 @@ plot_observed_predicted_agreement_monthly <- function() {
   obs_mle_2022[,model_num := "Observed"]
   
   obs_mle_sf <- left_join(nldas_polygons, obs_mle_2022)
-
+  
   # compare forecasts to observed to determine agreement
   agreement_2022 <- forecasts_mar_jul_2022[obs_mle_2022, on = c("nldasID")]
   agreement_2022[MLE >= 1,Agreement := ensemble_est >= 1]
@@ -392,13 +430,13 @@ plot_observed_predicted_agreement_monthly <- function() {
                                measure.vars = "Agreement",
                                variable.name = "Prediction", value.name = "MLE", variable.factor = F))
   agreement_2022[,Est.Type := "Agreement"]
-
+  
   # prepare forecast values for plotting
   obs_fcst <- forecasts_mar_jul_2022[,.(nldasID,ensemble_est,L.95,U.95, month)] %>%
     setnames("ensemble_est","Est") %>%
     mutate(Est.Type = "Predicted") %>%
     setDT()
-
+  
   # create binned MLE variable
   obs_fcst[, MLE := cut(Est, breaks = c(0, midpoint, threshold, 1E30),
                         labels = c(paste0("<", midpoint),
@@ -408,7 +446,7 @@ plot_observed_predicted_agreement_monthly <- function() {
   levels(obs_fcst$MLE) <- c(levels(obs_fcst$MLE),"0")
   obs_fcst[is.na(MLE), MLE := "0"]
   obs_fcst[,MLE := relevel(MLE,ref = "0")]
-
+  
   # combine observed, predicted, and agreement values
   obs_pred_agreement <- rbindlist(list(obs_fcst, agreement_2022), fill = TRUE)
   
@@ -416,11 +454,11 @@ plot_observed_predicted_agreement_monthly <- function() {
   obs_pred_agreement[, MLE := as.character(MLE)]
   levels(obs_pred_agreement$MLE) <- c(levels(obs_fcst$MLE),"TRUE","FALSE")
   obs_pred_agreement[,Est.Type := factor(Est.Type, levels = c("Predicted","Agreement"))]
-
+  
   # combine infection data with NLDAS cell polygons
   obs_pred_agreement_sf <- left_join(nldas_polygons, obs_pred_agreement, by = "nldasID")
   obs_pred_agreement_sf$MLE <- factor(obs_pred_agreement_sf$MLE, levels = levels(obs_pred_agreement$MLE))
-
+  
   # set plot colors
   pred_cols <- c(RColorBrewer::brewer.pal(name = "YlOrRd", n = 4), "#06ABEB", "#DC298D")
   names(pred_cols) <- levels(obs_pred_agreement$MLE)
@@ -446,7 +484,7 @@ plot_observed_predicted_agreement_monthly <- function() {
           legend.title = element_text(size = 14)) + 
     guides(fill = guide_legend(override.aes = list(size = 0.5)))
   
-  ggsave(paste0(figure_folder, "observed_2022.png"), observed, width = 8, height = 8)
+  ggsave(paste0(figure_folder, "observed_2022.jpg"), observed, width = 8, height = 8)
   
   # set labels for monthly predictions plot
   month_names <- paste(month.name[c(4:8)], 4)
@@ -471,131 +509,61 @@ plot_observed_predicted_agreement_monthly <- function() {
           legend.text = element_text(size = 14),
           legend.title = element_text(size = 14))
   
-  ggsave(paste0(figure_folder, "pred_agreement_monthly.png"), pred_map_2022, width = 12, height = 6)
+  ggsave(paste0(figure_folder, "pred_agreement_monthly.jpg"), pred_map_2022, width = 12, height = 6)
   
 }
 
 plot_observed_predicted_agreement_monthly()
 
-#######################       Scatterpie Plots       ###########################
+#######################   Ensemble Impact Bar Plots  ###########################
 
-# Scatterpie plotting
+# calculate ensemble impact for each parameter in ensemble 
+# as the product of model weight and parameter estimate
 
-# identify environmental variables in model (temperature and evapotranspiration)
-vars <- c("tmp", "evp")
-var_labels <- c("TEMP", "ET")
+ens_impact <- model_wts %>%
+  mutate(beta_wt = Estimate * adj.wts) %>%
+  group_by(varnames) %>%
+  summarize(model_impact = sum(beta_wt)) %>%
+  filter(varnames != "(Intercept)") %>%
+  mutate(bar_cols = ifelse(model_impact > 0, "#06ABEB","#DC298D")) %>%
+  setDT()
 
-# get_rel_imp
-#
-# Inputs:
-#   1. m.wts -- The weights of the model subset (Jan-Aug or Nov-Aug)
-#   2. model_ests -- All model parameters
-#   3. nov -- Boolean representing if subset is Nov-Aug (TRUE = Nov-Aug)
-#
-# Outputs:
-#   1. Relative importance of each variable in the ensemble by month
+ens_impact[,c("variable","month") := tstrsplit(varnames,"_")]
+ens_impact[,month := as.numeric(month)]
 
-get_rel_imp <- function(model_wts, start_month) {
-  
-  # remove intercept, extract sign from each variable's estimate
-  month_wts <- model_wts[varnames != "(Intercept)",.(dir = sign(Estimate),adj.wts),.(varnames,model_num)]
-  
-  # weighted proportion of each variable in ensemble grouped by direction
-  relative_importance <- unique(month_wts[,.(relative_imp = sum(adj.wts)), .(dir, varnames)])
-  relative_importance[,c("variable","month") := tstrsplit(varnames,"_")]
-  relative_importance[,month := as.numeric(month)]
-  
-  # split env variables
-  
-  for (i in 1:length(vars)) {
-    
-    relative_importance[variable == vars[i], var_position := i]
-    
-  }
-  
-  # pivot relative_importance into negative and positive portions
-  ri.4p <- dcast(relative_importance,variable + month + var_position ~ dir,value.var = "relative_imp", fill = 0)
-  setnames(ri.4p,c('-1','1'),c("neg_perc","pos_perc"))
-  
-  # placeholder to fill rest of pie plot
-  
-  ri.4p[,no_wt := 1 - (neg_perc + pos_perc)]
-  
-  # shift month labels for November and December plotting
-  if(start_month >= 9) {
-    ri.4p[, shifted_month := ifelse(month > 8, month - start_month + 1, month + 13 - start_month)]
-  } else {
-    ri.4p[, shifted_month := (month - start_month + 1)]
-  }
-  
-  # return relative importance data table
-  return(ri.4p)
-  
-}
+month_range <- c(10:12, 1:7)
 
-# plot_scatterpie
-#
-# Inputs:
-#   1. model_ests -- All model parameters
-#   2. subtitle -- Subtitle for the scatterpie plot, use default as guide
-#
-# No direct outputs, saves scatterpie plot for November to July
+ens_impact$shifted_month <- ifelse(ens_impact$month > 9, ens_impact$month - 9, ens_impact$month + 3)
+ens_impact$variable <- ifelse(ens_impact$variable == "tmp", "ATMP", "ET")
 
-plot_scatterpie <- function(model_ests,
-                            subtitle = "NLDAS scale 4-predictor ensemble model, 2006 to 2022") {
-  
-  # define positive, negative, and filler colors, respectively
-  pos_cols <- c("#06ABEB","#DC298D", "white")
-  
-  # get ensemble weights for variables between November and July, inclusive
-  nov_jul_wts <- get_model_weights(model_ests, c(11, 7))
-  
-  if (!is.character(nov_jul_wts)) {
-    
-    write.csv(nov_jul_wts, paste0(figure_folder, "nov_jul_models_", start_year, "_", end_year, ".csv"), row.names = FALSE)
-    nov_jul_num_models <- nrow(nov_jul_wts) / 5
-    
-    # get relative importance of each variable in subsetted ensemble
-    nov_jul_ri <- get_rel_imp(nov_jul_wts, start_month = 11)
-    
-    # Nov-Jul scatterpie
-    
-    nov_jul_nldas_4p_subset <- ggplot() +
-      geom_scatterpie(data = nov_jul_ri,
-                      aes(x = shifted_month, y = var_position),
-                      pie_scale = 3,
-                      cols = c("pos_perc","neg_perc","no_wt")) +
-      coord_fixed() +
-      scale_x_discrete(limits = c(month.abb[c(11:12, 1:7)]), labels = c(month.abb[c(11:12, 1:7)])) +
-      scale_y_continuous(breaks = 1:length(vars), labels = var_labels) +
-      scale_fill_manual(values = pos_cols, 
-                        name = expression("Effect on" ~ I[M]),
-                        labels = c("Increase", "Decrease", ""),
-                        breaks = c("pos_perc", "neg_perc", "no_wt")) +
-      labs(x = "Month",title = "Environmental Variable Importance by Month, Coachella Valley",
-           subtitle = subtitle,
-           caption = paste0("\n\nNote: ", nov_jul_num_models, " models with environmental variables in Nov-Jul included in ensemble model")) +
-      ylab(NULL) +
-      theme(plot.title = element_text(size = 18, face = "bold"),
-            plot.subtitle = element_text(size = 16),
-            plot.caption = element_text(size = 12, hjust = 0))
-    
-    nov_jul_nldas_4p_subset
-    
-    # save plots to specified destinations
-    
-    ggsave(nov_jul_nldas_4p_subset,
-           filename = paste0(figure_folder, "CV_NLDAS_4p_", start_year, "_", end_year, "_Nov_Jul.png"),
-           width = 15, height = 8)
-    
-  }
-  
-}
+pos_cols <- c("#06ABEB","#DC298D")
 
-plot_scatterpie(model_ests,
-                subtitle = paste("NLDAS scale 4-predictor ensemble model, ", 
-                                 start_year, " to ", end_year, "\n", MLE_def_str, 
-                                 " \n", "\n", sep = ""))
+# patterned bar plot showing direction and magnitude of each parameter's effect on predicted infection rate
+ens_impact_bar_plot <- ens_impact %>%
+  ggplot(aes(x = shifted_month, y = model_impact, pattern = variable, fill = bar_cols)) + 
+  geom_col_pattern(color = "black",
+                   pattern_fill = "black",
+                   pattern_angle = 45,
+                   pattern_density = 0.1,
+                   pattern_spacing = 0.025,
+                   pattern_key_scale_factor = 0.6) + 
+  geom_hline(yintercept = 0) + 
+  scale_pattern_manual(values = c(ATMP = "stripe", ET = "none")) +
+  scale_fill_manual(values = pos_cols, 
+                    name = expression("Effect on" ~ I[M]),
+                    labels = c("Increase", "Decrease"),
+                    breaks = c("#06ABEB","#DC298D")) + 
+  guides(pattern = guide_legend(override.aes = list(fill = "white")),
+         fill = guide_legend(override.aes = list(pattern = "none"))) + 
+  scale_x_discrete(limits = c(month.abb[month_range]), labels = c(month.abb[month_range])) + 
+  scale_y_continuous(limits = c(-0.6, 1), breaks = round(seq(-0.6, 1, by = 0.2), 2)) + 
+  labs(x = "Month",
+       y = "Ensemble Impact",
+       pattern = "Variable")
+
+ens_impact_bar_plot
+
+ggsave(paste0(figure_folder, "ens_impact_bar_plot.jpg"), ens_impact_bar_plot, width = 8, height = 5)
 
 #######################    Annual Infection Rates    ###########################
 
@@ -621,11 +589,12 @@ annual_inf_rates <- ggmap(terrain) +
         strip.text = element_text(size = 14),
         axis.title = element_text(size = 14),
         legend.text = element_text(size = 14),
-        legend.title = element_text(size = 14)) + 
+        legend.title = element_text(size = 14),
+        plot.title = element_blank()) + 
   facet_wrap(~year, nrow = 3, ncol = 6)
 
 ggsave(annual_inf_rates, 
-       filename = paste0(figure_folder, "NLDAS_Annual_Inf_Rates.png"),
+       filename = paste0(figure_folder, "NLDAS_Annual_Inf_Rates.jpg"),
        height = 10, width = 16, units = "in")
 
 #######################    NLDAS ID + Frequencies    ###########################
@@ -646,21 +615,21 @@ nldas_id_map <- ggmap(terrain) +
         axis.ticks.y = element_blank()) + 
   guides(fill = guide_legend(override.aes = list(size = 0.5)))
 
-ggsave(paste0(figure_folder, "nldas_id_map.png"), nldas_id_map, width = 8, height = 8)
+ggsave(paste0(figure_folder, "nldas_id_map.jpg"), nldas_id_map, width = 8, height = 8)
 
 
 #######################        MLE Histogram         ###########################
 
 # histogram to show distribution of infection rates in training data
 mle_hist <- nldas_mle_annual %>%
-  filter(year %in% start_year:end_year) %>%
+  filter(year %in% 2006:2021) %>%
   ggplot(aes(x = MLE)) +
-  geom_histogram() + 
+  geom_histogram(color = "black") + 
   geom_vline(xintercept = threshold, linetype = "dashed", color = "red") +
   annotate("text", x = threshold + 0.2, y = 60, label = "75th Percentile", angle = 90) + 
-  scale_x_continuous(name = "Mean Annual Mosquito Infection Rate Per 1000 Tested",
-                     breaks = seq(0, 30, 5)) + 
+  scale_x_continuous(name = "Annual Mosquito Infection Rate Per 1000 Tested",
+                     breaks = c(0, 1, 5, 10)) + 
   labs(y = "Frequency")
 
-ggsave(paste0(figure_folder, "mle_histogram.png"), mle_hist,
+ggsave(paste0(figure_folder, "mle_histogram.jpg"), mle_hist,
        width = 10, height = 6)

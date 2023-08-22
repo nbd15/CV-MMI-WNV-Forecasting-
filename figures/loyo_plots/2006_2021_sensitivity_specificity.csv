@@ -1,0 +1,2 @@
+"model_type","start_year","end_year","obs_v_best_sens","obs_v_best_spec","obs_v_best_rmse","obs_v_ens_sens","obs_v_ens_spec","obs_v_ens_rmse","obs_v_null_sens","obs_v_null_spec","obs_v_null_rmse"
+"LOYO",2006,2021,0.4359,0.8584,2.13949323121373,0.4872,0.8584,1.66068763863944,0.3077,0.7434,1.50917886545562

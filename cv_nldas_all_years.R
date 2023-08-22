@@ -32,7 +32,7 @@ new_cols <- c("tmp_lag", "evp_lag")
 
 # shift environmental data back by 4 months
 # each year is now represented as September to August
-env_dt <- nldas_dt[, (new_cols) := shift(.SD, 4), by = nldasID, .SDcols = og_cols]
+env_dt <- nldas_dt[, (new_cols) := data.table::shift(.SD, 4), by = nldasID, .SDcols = og_cols]
 env_dt <- env_dt[year %in% years]
 
 # standardize training data

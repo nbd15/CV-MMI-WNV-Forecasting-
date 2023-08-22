@@ -22,7 +22,7 @@ nldas_dt <- nldas_dt[order(nldasID, year, month)]
 # range of years and months to include in ensemble
 start_year <- 2006
 end_year <- 2021
-start_month <- 11
+start_month <- 10
 end_month <- 7
 
 years <- start_year:end_year
@@ -33,7 +33,7 @@ new_cols <- c("tmp_lag", "evp_lag")
 
 # shift environmental data by 4 months
 # each year now represented as September to August
-env_dt <- nldas_dt[, (new_cols) := shift(.SD, 4), by = nldasID, .SDcols = og_cols]
+env_dt <- nldas_dt[, (new_cols) := data.table::shift(.SD, 4), by = nldasID, .SDcols = og_cols]
 env_dt <- env_dt[year %in% years]
 
 for (i.year in start_year:end_year) {

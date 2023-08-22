@@ -100,14 +100,14 @@ glmm_wts <- function(dt,p.val = 0.05,...){
   return(sigModels)
 }
 
-get_model_weights <- function(model_ests, month_range = c(11, 7), vars = c("tmp", "evp"), n_preds = 4) {
+get_model_weights <- function(model_ests, month_range = c(10, 7), vars = c("tmp", "evp"), n_preds = 4) {
   
   # get_model_weights
   #
   # Inputs:
   #   1. model_ests -- All model parameters
   #   2. month_range -- Range of months to include in ensemble
-  #     a. Integer vector with default c(11, 7): November to July
+  #     a. Integer vector with default c(10, 7): October to July
   #
   # Outputs:
   #   1. model_wts -- A data table with the parameters and adjusted weights for each model in the ensemble
@@ -163,8 +163,10 @@ prediction_from_model <- function(i.model, train_dt, test_dt, var.dt, m.wts){
   #
   # Inputs:
   #   1. i.model -- Model number to generate prediction for
-  #   2. test_dt -- Test environmental data to get prediction for
-  #   3. m.wts -- Parameters and adjusted weights of models in ensemble
+  #   2. train_dt -- Training environmental and mosquito infection data used to train ensemble
+  #   3. test_dt -- Test environmental data to get prediction for
+  #   4. var.dt -- All model parameter combinations and corresponding model number
+  #   5. m.wts -- Parameters and adjusted weights of models in ensemble
   #
   # Outputs:
   #   1. final.lin.est -- A data table containing the following for each NLDAS cell:
@@ -332,4 +334,79 @@ nldas_prediction_function <- function(train.dt,test.dt,n_predictors,
   return(list(final.est = final.ens.est, best.est = best.est,
               models = dt_glmm_nbinom_df,
               model_weights = dt_sigModels))
+}
+
+prediction_from_model_wilcox <- function(i.model, train_dt, test_dt_env, test_dt_no_env, var.dt, m.wts){
+  
+  # prediction_from_model_wilcox
+  #
+  # Inputs:
+  #   1. i.model -- Model number to generate prediction for
+  #   2. train_dt -- Training environmental and mosquito infection data used to train ensemble
+  #   3. test_dt_env -- Test dataset with observed environmental data
+  #   4. test_dt_no_env -- Test dataset with no added environmental data
+  #   5. var.dt -- All model parameter combinations and corresponding model number
+  #   6. m.wts -- Parameters and adjusted weights of models in ensemble
+  #
+  # Outputs:
+  #   1. final.lin.est -- A data table containing the following for each NLDAS cell:
+  #     a. Fixed and random effects
+  #     b. Estimates in linear and log scale
+  #     c. Variance and confidence intervals in linear scale
+  #     d. Weight associated with the model used for predictions
+  
+  message(i.model)
+  
+  # Get the re-normalised weight for the model selected
+  wt <- unique(m.wts[model_num == i.model, adj.wts])
+  
+  # Get the data for the variables in the model
+  test.subset <- train_dt[,names(train_dt)[match(c("MLE","nldasID",var.dt[i.model,]), 
+                                                 names(train_dt))],with = F]
+  
+  f = as.formula(paste0("MLE~",paste(paste(var.dt[i.model,],collapse = "+"),
+                                     "(1|nldasID)", sep = "+")))
+  # Run the model
+  admb.model <- glmmadmb(f, data = test.subset, family = "nbinom",zeroInflation = T)
+  
+  # Ensure the test and train datasets have the same nldasIDs, otherwise prediction throws an error
+  
+  nids <- unique(train_dt$nldasID)
+  
+  # Get the fixed effects and their standard errors from the model for the IDs in nids above, on the log scale
+  FEs_env <- predict(admb.model, type = "link",
+                     newdata = test_dt_env, se.fit = T)
+  REs <- ranef(admb.model)$nldasID # Get the random effects for each nldasID in the test dataset subset
+  
+  FEs_no_env <- predict(admb.model, type = "link",
+                        newdata = test_dt_no_env, se.fit = T)
+  REs <- ranef(admb.model)$nldasID # Get the random effects for each nldasID in the test dataset subset
+  
+  # REs in the step above are a matrix, with the row names being the nldasIDs. Attache these row names to enable easier
+  # identification
+  REs <- REs[rownames(REs) %in% nids,]
+  
+  # Get the prediction from the model on the log scale as the sum of the fixed effect and random effect for each 
+  # NLDAS grid cell 
+  final.lin.est <- as.data.table(cbind(fixed_env = FEs_env$fit,
+                                       fixed_no_env = FEs_no_env$fit,
+                                       random = REs,
+                                       log.est_env = REs + FEs_env$fit,
+                                       log.est_no_env = REs + FEs_no_env$fit, # log scale estimate for each NLDAS grid
+                                       log.se_env = FEs_env$se.fit,
+                                       log.se_no_env = FEs_no_env$se.fit # log scale SE for each NLDAS grid
+  ),keep.rownames = "nldasID")    
+  
+  # Convert the prediction on the log scale to the natural scale, with the appropriate adjustment from the log-normal 
+  # distribution to the normal distribution
+  
+  final.lin.est <- final.lin.est %>%
+    mutate(est_env = exp(log.est_env + (log.se_env^2)/2),
+           est_no_env = exp(log.est_no_env + (log.se_no_env^2)/2),
+           var_env = exp((2*log.est_env) + log.se_env^2)*(exp(log.se_env^2) - 1),
+           var_no_env = exp((2*log.est_no_env) + log.se_no_env^2)*(exp(log.se_no_env^2) - 1))
+  
+  final.lin.est[,weight := wt]
+  
+  return(final.lin.est)
 }

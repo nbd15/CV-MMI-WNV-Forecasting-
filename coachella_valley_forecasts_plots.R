@@ -8,11 +8,11 @@
 #   3. Shapefile for NLDAS grids of region
 #   4. Bounding box coordinates for region of interest -- used to generate terrain object
 #   5. All model parameters from model output -- for predictions and plotting
-#   6. Model input files (MLE and NLDAS)
+#   6. Model input files (Estimated infection rates and NLDAS environmental data)
 #   7. Number of predictors in each model
 #
 # Functions:
-#   1. get_model_weights -- generates ensemble model weights for the specified subset of months
+#   1. get_training_data -- generates data needed for training ensemble models
 #   2. get_forecast_for_year -- generates an ensemble prediction for a given year
 #      by compiling the results of individual models in the ensemble
 #   3. plot_observed_predicted_agreement -- plots observed and predicted infection rates for 2022
@@ -20,8 +20,6 @@
 #   4. get_monthly_predictions -- generates a real-time ensemble forecast for months in 2022
 #   5. plot_observed_predicted_agreement_monthly -- plots 2022 observed infection rate
 #      and real-time monthly predictions with agreement between observed and predicted
-#   6. get_rel_imp -- calculates relative importance of each environmental variable in ensemble
-#   7. plot_scatterpie -- generates scatterpie plot for Nov-Jul ensemble model subset
 
 # load packages
 suppressPackageStartupMessages({
@@ -388,7 +386,7 @@ get_monthly_predictions <- function(pred_month, m.wts, pred_year) {
   
 }
 
-# get Nov-Aug models and weights
+# get Oct-Aug models and weights
 model_wts <- get_model_weights(model_ests_2021, month_range = c(10, 7))
 
 training_data <- get_training_data(2006, 2021)
